@@ -71,46 +71,63 @@ def load_csv(path: Path, columns: list[str]) -> pd.DataFrame:
         df = pd.read_csv(path)
     else:
         df = pd.DataFrame(columns=columns)
-    # fehlende Spalten ergänzen
+
+    # Spalten sicherstellen & Reihenfolge
     for c in columns:
         if c not in df.columns:
             df[c] = np.nan
     df = df[columns].copy()
 
-    # leere Strings -> NaN
+    # Leere Strings -> NaN
     df = df.replace(r'^\s*$', np.nan, regex=True)
 
-    # numerisch parsen
+    # Zahlenfelder
     for c in ["duration_min","distance_km","rpe","tss","avg_hr","avg_power"]:
         if c in df.columns:
             df[c] = pd.to_numeric(df[c], errors="coerce")
 
-    # textfelder
+    # Textfelder
     for c in ["id","title","sport","priority","notes","kind","color","phase_type","status"]:
         if c in df.columns:
             df[c] = df[c].astype(str).fillna("")
 
-    # datum robust (DD.MM.YYYY erlaubt) -> als date speichern
+    # Datumsfelder (auch DD.MM.YYYY erlauben)
     for c in ["date","start_date","end_date"]:
         if c in df.columns:
             df[c] = pd.to_datetime(df[c], errors="coerce", dayfirst=True).dt.date
 
-    # plan-zeilen ohne datumsrange raus
+    # Ungültige Plan-Zeilen raus
     if {"start_date","end_date"}.issubset(df.columns):
         df = df[df["start_date"].notna() & df["end_date"].notna()].copy()
 
-    # Migration: fehlende ids / status auffüllen
+    # --- Migration/Defaults: ids + status ---
+    # IDs auffüllen
     if "id" in df.columns:
-        mask_empty = (df["id"].astype(str)=="") | df["id"].isna()
-        if mask_empty.any():
-            df.loc[mask_empty, "id"] = [str(uuid.uuid4()) for _ in range(mask_empty.sum())]
+        mask_id = df["id"].astype(str).str.strip().eq("") | df["id"].isna()
+        if mask_id.any():
+            df.loc[mask_id, "id"] = [str(uuid.uuid4()) for _ in range(int(mask_id.sum()))]
+
+    # Status auffüllen (kein fillna mit Array!)
     if "status" in df.columns:
-        df["status"] = df["status"].replace({"": np.nan})
-        df["status"] = df["status"].fillna(
-            np.where(df.get("notes","").str.lower().eq("planned"), "planned", "done")
+        # normalisieren
+        df["status"] = df["status"].astype(str).str.lower()
+        df.loc[df["status"].isin(["nan","none"]), "status"] = ""
+        notes_lower = df["notes"].astype(str).str.lower() if "notes" in df.columns else pd.Series("", index=df.index)
+
+        # Default pro Zeile bestimmen
+        default_status = pd.Series(
+            np.where(notes_lower.eq("planned"), "planned", "done"),
+            index=df.index
         )
+        # nur leere/NaN-Felder überschreiben
+        mask_status = df["status"].isna() | (df["status"].str.strip() == "")
+        df.loc[mask_status, "status"] = default_status.loc[mask_status]
+
+        # auf erlaubte Werte begrenzen
+        df.loc[~df["status"].isin(["planned","done","skipped"]), "status"] = "done"
 
     return df
+
 
 def save_csv(df: pd.DataFrame, path: Path):
     ensure_dir()
