@@ -310,34 +310,55 @@ def tsb_gauge(value, title="TSB (Form)"):
         }
     ))
     return fig_layout_dark(fig)
-
 def year_heatmap(daily_df: pd.DataFrame, year: int):
-    # Build a GitHub-like heatmap (7 rows -> weekday, columns -> weeks)
-    if daily_df.empty: 
-        frame = pd.DataFrame({"date": pd.date_range(f"{year}-01-01", f"{year}-12-31")})
+    """
+    Neon-Heatmap im GitHub-Stil.
+    Fix: Aggregation über (dow, week), damit der Pivot keine Duplikate wirft.
+    """
+    # Basis-Frame mit allen Tagen des Jahres
+    all_days = pd.DataFrame({"date": pd.date_range(f"{year}-01-01", f"{year}-12-31", freq="D")})
+
+    if daily_df.empty:
+        frame = all_days.copy()
         frame["TL"] = 0.0
     else:
-        frame = daily_df.copy()
-        frame["date"] = pd.to_datetime(frame["date"])
-        frame = frame[(frame["date"].dt.year == year)]
-        all_days = pd.DataFrame({"date": pd.date_range(f"{year}-01-01", f"{year}-12-31")})
-        frame = all_days.merge(frame, on="date", how="left").fillna({"TL":0.0})
+        df = daily_df.copy()
+        df["date"] = pd.to_datetime(df["date"], errors="coerce")
+        df = df.dropna(subset=["date"])
+        # Nur dieses Jahr behalten
+        df = df[df["date"].dt.year == year][["date", "TL"]]
+        frame = all_days.merge(df, on="date", how="left").fillna({"TL": 0.0})
 
-    frame["dow"] = frame["date"].dt.dayofweek
-    frame["week"] = frame["date"].dt.isocalendar().week.astype(int)
-    # Shift week 53 of Jan to 0 for nice start
-    frame.loc[(frame["date"].dt.month==1) & (frame["week"]>50), "week"] = 0
+    # ISO-Attribute
+    iso = frame["date"].dt.isocalendar()
+    frame["dow"] = frame["date"].dt.dayofweek.astype(int)        # 0=Mo ... 6=So
+    frame["week"] = iso.week.astype(int)                         # 1..53
 
-    pivot = frame.pivot(index="dow", columns="week", values="TL").sort_index()
-    z = pivot.values
+    # Woche 53 in Januar optisch vor Woche 1 schieben (Spalte 0)
+    jan_mask = frame["date"].dt.month.eq(1) & (frame["week"] > 50)
+    frame.loc[jan_mask, "week"] = 0
+
+    # >>> Wichtig: Duplikate auflösen (sum über (dow, week))
+    agg = frame.groupby(["dow", "week"], as_index=False)["TL"].sum()
+
+    # Für saubere Achse Wochen sortieren
+    weeks_sorted = sorted(agg["week"].unique())
+
+    # Pivot ist nun sicher (keine doppelten Indexe mehr)
+    pivot = agg.pivot(index="dow", columns="week", values="TL").reindex(columns=weeks_sorted)
+    pivot = pivot.reindex(index=[0,1,2,3,4,5,6])  # Mo..So
+
+    # Heatmap
     fig = go.Figure(data=go.Heatmap(
-        z=z,
+        z=pivot.values,
         x=pivot.columns,
         y=["Mo","Di","Mi","Do","Fr","Sa","So"],
         colorscale=[[0,"#0ea5e9"], [0.5,"#a78bfa"], [1,"#f472b6"]],
-        colorbar=dict(title="TL")
+        colorbar=dict(title="TL"),
+        hovertemplate="Woche %{x} • %{y}<br>TL=%{z:.0f}<extra></extra>",
     ))
     return fig_layout_dark(fig, f"Jahres-Heatmap {year}")
+
 
 # -------------------- UI helpers --------------------
 def status_styles(status: str):
