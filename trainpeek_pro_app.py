@@ -23,28 +23,46 @@ def ensure_dir():
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 def load_csv(path: Path, columns: list[str]) -> pd.DataFrame:
+    import numpy as np
     if path.exists():
         df = pd.read_csv(path)
     else:
         df = pd.DataFrame(columns=columns)
+
+    # fehlende Spalten ergänzen & Reihenfolge sichern
     for c in columns:
         if c not in df.columns:
             df[c] = np.nan
     df = df[columns].copy()
-    if not df.empty:
-        if "date" in df.columns:
-            df["date"] = pd.to_datetime(df["date"]).dt.date
-        if "start_date" in df.columns:
-            df["start_date"] = pd.to_datetime(df["start_date"]).dt.date
-        if "end_date" in df.columns:
-            df["end_date"] = pd.to_datetime(df["end_date"]).dt.date
-        for c in ["duration_min","distance_km","rpe","tss"]:
-            if c in df.columns:
-                df[c] = pd.to_numeric(df[c], errors="coerce")
-        for c in ["title","sport","priority","notes","kind","color"]:
-            if c in df.columns:
-                df[c] = df[c].astype(str).fillna("")
+
+    # leere Strings -> NaN (sonst stolpert to_datetime)
+    df = df.replace(r'^\s*$', np.nan, regex=True)
+
+    # Zahlenfelder
+    for c in ["duration_min","distance_km","rpe","tss"]:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+
+    # Textfelder
+    for c in ["title","sport","priority","notes","kind","color"]:
+        if c in df.columns:
+            df[c] = df[c].astype(str).fillna("")
+
+    # Datumsfelder ROBUST parsen (erlaubt ISO 2025-09-25 und 25.09.2025)
+    if "date" in df.columns:
+        df["date"] = pd.to_datetime(df["date"], errors="coerce", dayfirst=True).dt.date
+
+    if "start_date" in df.columns:
+        df["start_date"] = pd.to_datetime(df["start_date"], errors="coerce", dayfirst=True).dt.date
+    if "end_date" in df.columns:
+        df["end_date"]   = pd.to_datetime(df["end_date"],   errors="coerce", dayfirst=True).dt.date
+
+    # Unbrauchbare Plan-Zeilen entfernen (ohne Start/Ende)
+    if {"start_date","end_date"}.issubset(df.columns):
+        df = df[~df["start_date"].isna() & ~df["end_date"].isna()].copy()
+
     return df
+
 
 def save_csv(df: pd.DataFrame, path: Path):
     ensure_dir()
