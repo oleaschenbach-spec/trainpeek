@@ -1,11 +1,9 @@
 # trainpeek_pro_app.py
-# Neon-Dark-Design für Trainingsapp:
-# - Dark Theme & Neon UI (CSS)
-# - Plotly Neon Charts: ATL/CTL (Ist + Forecast), Weekly Load Bar, TSB Gauge, Jahres-Heatmap
-# - Zeitraum-Switcher (1W / 1M / 3M / 1J)
-# - Kalender-Karten im Neon-Look
-#
-# Bestehende Features bleiben: Phasen, Auto-TSS (HR/Power), Status planned/done/skipped, Forecast.
+# TrainPeek Pro — Neon Dark App
+# - Linke Seiten-Navigation: Startseite, Planer (Kalender), Analysen, Einstellungen
+# - Startseite: KPI-Karten (TSS Woche, Form/TSB, ATL, CTL) + Wochen-Übersicht (geplant/erledigt + nächste Workouts)
+# - Runde, saubere Karten (größere Rundungen)
+# - Bestehendes: Phasen, Auto-TSS, Status planned/done/skipped, Forecast, Neon-Plotly Charts
 
 import streamlit as st
 import pandas as pd
@@ -13,10 +11,7 @@ import numpy as np
 from pathlib import Path
 from datetime import date, timedelta, datetime
 import json, uuid
-
-# --- Plotly (Neon Charts) ---
 import plotly.graph_objects as go
-import plotly.express as px
 
 st.set_page_config(page_title="TrainPeek Pro — Neon", page_icon="🏃‍♂️", layout="wide")
 
@@ -51,10 +46,10 @@ NEON = {
     "card":    "#161B22",
     "muted":   "#9CA3AF",
     "text":    "#E5E7EB",
-    "primary": "#60A5FA",   # blue-400
-    "cyan":    "#22D3EE",   # cyan-400
-    "pink":    "#F472B6",   # pink-400
-    "violet":  "#A78BFA",   # violet-400
+    "primary": "#60A5FA",
+    "cyan":    "#22D3EE",
+    "pink":    "#F472B6",
+    "violet":  "#A78BFA",
     "amber":   "#F59E0B",
     "green":   "#10B981",
     "orange":  "#FB923C",
@@ -77,19 +72,50 @@ def inject_theme():
   --amber: {NEON['amber']};
   --green: {NEON['green']};
 }}
-html, body, [class*="css"]  {{
+html, body, [class*="css"] {{
   background-color: var(--bg) !important;
   color: var(--text) !important;
   font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
 }}
+/* App-Shell */
+.tp-app {{
+  display: grid;
+  grid-template-columns: 240px 1fr;
+  gap: 16px;
+}}
+/* Sidebar */
+.tp-side {{
+  position: sticky; top: 16px;
+  height: calc(100vh - 32px);
+  background: var(--card);
+  border: 1px solid rgba(255,255,255,.06);
+  border-radius: 18px;                 /* -> runder */
+  padding: 14px;
+  box-shadow: 0 1px 1px rgba(0,0,0,.25), 0 10px 24px rgba(0,0,0,.35);
+}}
+.tp-side a {{
+  display:block; padding:10px 12px; border-radius: 12px; color: var(--text); text-decoration: none;
+  border: 1px solid transparent;
+}}
+.tp-side a:hover {{ background: rgba(255,255,255,.04); border-color: rgba(255,255,255,.08); }}
+.tp-side .active {{ background: rgba(96,165,250,.12); border-color: rgba(96,165,250,.35); color: #dbeafe; }}
 /* Karten */
 .tp-card {{
   background: var(--card);
   border: 1px solid rgba(255,255,255,.06);
-  border-radius: 14px;
-  padding: 12px 14px;
+  border-radius: 18px;                 /* -> runder */
+  padding: 14px;
   box-shadow: 0 1px 1px rgba(0,0,0,.25), 0 10px 24px rgba(0,0,0,.35);
 }}
+/* KPI */
+.tp-kpi {{
+  background: var(--card);
+  border: 1px solid rgba(255,255,255,.08);
+  border-radius: 18px;
+  padding: 14px;
+}}
+.tp-kpi .label {{ color: var(--muted); font-size: 12px; }}
+.tp-kpi .value {{ font-size: 28px; font-weight: 700; }}
 /* Chips / Status */
 .tp-chip {{
   display:inline-block; padding:2px 10px; border-radius:999px; font-size:12px; font-weight:600;
@@ -101,19 +127,24 @@ html, body, [class*="css"]  {{
 .tp-btn-icon {{
   background: rgba(255,255,255,.06);
   border: 1px solid rgba(255,255,255,.08);
-  border-radius: 10px; padding:6px 10px; font-weight:600;
+  border-radius: 12px; padding:6px 10px; font-weight:600;
 }}
 .tp-btn-icon:hover {{ border-color: var(--primary); box-shadow: 0 0 0 2px rgba(96,165,250,.2) inset; }}
 /* Tageskopf im Kalender */
 .tp-dayhead {{ font-size:13px; font-weight:700; color:#cbd5e1; margin-bottom:6px; }}
-/* Tabellen / Plotly Hintergrund angleichen */
+/* Tabellen / Plotly */
 [data-testid="stDataFrame"] div, .plotly .main-svg {{ color: var(--text) !important; }}
+/* Content-Container rechts */
+.tp-main {{ }}
+/* Headline */
+.tp-h1 {{ font-size: 20px; font-weight: 700; margin: 0 0 8px 0; }}
+.tp-sub {{ color: var(--muted); font-size: 13px; }}
 </style>
         """,
         unsafe_allow_html=True,
     )
 
-# ---------- Timestamp Helper (Date vs Datetime) ----------
+# ---------- Timestamp Helper ----------
 def _ts(x):
     if isinstance(x, pd.Series): return pd.to_datetime(x, errors="coerce").dt.normalize()
     return pd.Timestamp(x).normalize()
@@ -140,37 +171,29 @@ def load_csv(path: Path, columns: list[str]) -> pd.DataFrame:
     if path.exists(): df = pd.read_csv(path)
     else: df = pd.DataFrame(columns=columns)
 
-    # Spalten sicherstellen & Reihenfolge
     for c in columns:
         if c not in df.columns: df[c] = np.nan
     df = df[columns].copy()
 
-    # Leere Strings -> NaN
     df = df.replace(r'^\s*$', np.nan, regex=True)
 
-    # Zahlenfelder
     for c in ["duration_min","distance_km","rpe","tss","avg_hr","avg_power"]:
         if c in df.columns: df[c] = pd.to_numeric(df[c], errors="coerce")
 
-    # Textfelder
     for c in ["id","title","sport","priority","notes","kind","color","phase_type","status"]:
         if c in df.columns: df[c] = df[c].astype(str).fillna("")
 
-    # Datumsfelder (DD.MM.YYYY erlaubt)
     for c in ["date","start_date","end_date"]:
         if c in df.columns: df[c] = pd.to_datetime(df[c], errors="coerce", dayfirst=True).dt.date
 
-    # Ungültige Plan-Zeilen raus
     if {"start_date","end_date"}.issubset(df.columns):
         df = df[df["start_date"].notna() & df["end_date"].notna()].copy()
 
-    # IDs auffüllen
     if "id" in df.columns:
         mask_id = df["id"].astype(str).str.strip().eq("") | df["id"].isna()
         if mask_id.any():
             df.loc[mask_id, "id"] = [str(uuid.uuid4()) for _ in range(int(mask_id.sum()))]
 
-    # Status normalisieren
     if "status" in df.columns:
         df["status"] = df["status"].astype(str).str.lower()
         df.loc[df["status"].isin(["nan","none"]), "status"] = ""
@@ -190,12 +213,10 @@ def auto_tss_from_metrics(row: pd.Series, settings: dict) -> float | None:
     dur_min = float(row.get("duration_min") or 0.0)
     if dur_min <= 0: return None
     dur_h = dur_min / 60.0
-    # Power (Bike)
     if str(row.get("sport","")).lower() == "bike":
         avg_power = row.get("avg_power"); ftp = settings.get("ftp_watt")
         if pd.notna(avg_power) and avg_power and ftp and ftp > 0:
             IF = float(avg_power) / float(ftp); return dur_h * (IF**2) * 100.0
-    # Herzfrequenz
     avg_hr = row.get("avg_hr"); lthr = settings.get("lthr_bpm")
     if pd.notna(avg_hr) and avg_hr and lthr and lthr > 0:
         HRr = float(avg_hr) / float(lthr); return dur_h * (HRr**2) * 100.0
@@ -260,7 +281,7 @@ def weekly_summary(df: pd.DataFrame, settings: dict) -> pd.DataFrame:
         TL=("TL","sum"),
     ).sort_values("week_start")
 
-# -------------------- NEON PLOTLY HELPERS --------------------
+# -------------------- Charts (dark) --------------------
 def fig_layout_dark(fig, title=None):
     fig.update_layout(
         template="plotly_dark",
@@ -279,24 +300,17 @@ def neon_line(x, ys: dict, title=None):
     fig = go.Figure()
     for name, series in ys.items():
         color = series.get("color"); y = series["y"]
-        fig.add_trace(go.Scatter(x=x, y=y, mode="lines",
-                                 line=dict(width=3, color=color),
-                                 name=name))
+        fig.add_trace(go.Scatter(x=x, y=y, mode="lines", line=dict(width=3, color=color), name=name))
     return fig_layout_dark(fig, title)
 
 def neon_bar(x, y, title=None, color=None):
-    fig = go.Figure(go.Bar(x=x, y=y,
-                           marker=dict(color=color or NEON["primary"],
-                                       line=dict(color="rgba(255,255,255,.15)", width=1))))
+    fig = go.Figure(go.Bar(x=x, y=y, marker=dict(color=color or NEON["primary"], line=dict(color="rgba(255,255,255,.15)", width=1))))
     return fig_layout_dark(fig, title)
 
 def tsb_gauge(value, title="TSB (Form)"):
-    # typischer Bereich ca. -40 .. +40
     vmax = 40; vmin = -40
     fig = go.Figure(go.Indicator(
-        mode="gauge+number",
-        value=value,
-        title={"text": title},
+        mode="gauge+number", value=value, title={"text": title},
         gauge={
             "axis": {"range":[vmin, vmax], "tickcolor": NEON["muted"]},
             "bar": {"color": NEON["cyan"]},
@@ -310,45 +324,31 @@ def tsb_gauge(value, title="TSB (Form)"):
         }
     ))
     return fig_layout_dark(fig)
-def year_heatmap(daily_df: pd.DataFrame, year: int):
-    """
-    Neon-Heatmap im GitHub-Stil.
-    Fix: Aggregation über (dow, week), damit der Pivot keine Duplikate wirft.
-    """
-    # Basis-Frame mit allen Tagen des Jahres
-    all_days = pd.DataFrame({"date": pd.date_range(f"{year}-01-01", f"{year}-12-31", freq="D")})
 
+# Heatmap: robuste Version (fix für Duplikate)
+def year_heatmap(daily_df: pd.DataFrame, year: int):
+    all_days = pd.DataFrame({"date": pd.date_range(f"{year}-01-01", f"{year}-12-31", freq="D")})
     if daily_df.empty:
-        frame = all_days.copy()
-        frame["TL"] = 0.0
+        frame = all_days.copy(); frame["TL"] = 0.0
     else:
         df = daily_df.copy()
         df["date"] = pd.to_datetime(df["date"], errors="coerce")
         df = df.dropna(subset=["date"])
-        # Nur dieses Jahr behalten
         df = df[df["date"].dt.year == year][["date", "TL"]]
         frame = all_days.merge(df, on="date", how="left").fillna({"TL": 0.0})
 
-    # ISO-Attribute
     iso = frame["date"].dt.isocalendar()
-    frame["dow"] = frame["date"].dt.dayofweek.astype(int)        # 0=Mo ... 6=So
-    frame["week"] = iso.week.astype(int)                         # 1..53
-
-    # Woche 53 in Januar optisch vor Woche 1 schieben (Spalte 0)
+    frame["dow"] = frame["date"].dt.dayofweek.astype(int)
+    frame["week"] = iso.week.astype(int)
     jan_mask = frame["date"].dt.month.eq(1) & (frame["week"] > 50)
     frame.loc[jan_mask, "week"] = 0
 
-    # >>> Wichtig: Duplikate auflösen (sum über (dow, week))
     agg = frame.groupby(["dow", "week"], as_index=False)["TL"].sum()
-
-    # Für saubere Achse Wochen sortieren
     weeks_sorted = sorted(agg["week"].unique())
 
-    # Pivot ist nun sicher (keine doppelten Indexe mehr)
     pivot = agg.pivot(index="dow", columns="week", values="TL").reindex(columns=weeks_sorted)
-    pivot = pivot.reindex(index=[0,1,2,3,4,5,6])  # Mo..So
+    pivot = pivot.reindex(index=[0,1,2,3,4,5,6])
 
-    # Heatmap
     fig = go.Figure(data=go.Heatmap(
         z=pivot.values,
         x=pivot.columns,
@@ -358,7 +358,6 @@ def year_heatmap(daily_df: pd.DataFrame, year: int):
         hovertemplate="Woche %{x} • %{y}<br>TL=%{z:.0f}<extra></extra>",
     ))
     return fig_layout_dark(fig, f"Jahres-Heatmap {year}")
-
 
 # -------------------- UI helpers --------------------
 def status_styles(status: str):
@@ -389,37 +388,114 @@ def weekly_planner_form(ref_week: date):
 def mark_done_ui(row_id: str):
     return st.button("✅ Erledigt", key=f"done_{row_id}")
 
-# -------------------- APP --------------------
+# ===================== APP =====================
 def main():
     inject_theme()
     ensure_dir()
     settings = load_settings()
 
-    st.markdown("<div class='tp-card'><h3 style='margin:0'>🏃‍♂️ TrainPeek Pro — Neon</h3><div style='color:#9CA3AF'>Dark UI & Neon Charts</div></div>", unsafe_allow_html=True)
-    st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+    # ----- App-Shell mit linker Navigation -----
+    st.markdown("<div class='tp-app'>", unsafe_allow_html=True)
 
-    # --- Einstellungen (kompakt) ---
-    with st.expander("⚙️ Einstellungen"):
-        c1, c2, c3 = st.columns(3)
-        with c1: ftp = st.number_input("FTP (W, nur Bike)", min_value=0, step=5, value=int(settings.get("ftp_watt") or 0))
-        with c2: lthr = st.number_input("LTHR (bpm)", min_value=0, step=1, value=int(settings.get("lthr_bpm") or 0))
-        with c3: forecast_days = st.number_input("Forecast (Tage)", min_value=7, max_value=90, step=7, value=int(settings.get("forecast_days") or 28))
-        if st.button("Speichern"):
-            settings["ftp_watt"] = int(ftp) if ftp>0 else None
-            settings["lthr_bpm"] = int(lthr) if lthr>0 else None
-            settings["forecast_days"] = int(forecast_days)
-            save_settings(settings)
-            st.success("Einstellungen gespeichert.")
+    # Sidebar (eigene Navigation)
+    with st.container():
+        st.markdown("<div class='tp-side'>", unsafe_allow_html=True)
+        st.markdown("<div class='tp-h1'>🏃‍♂️ TrainPeek Pro</div><div class='tp-sub'>Neon Dark</div><hr/>", unsafe_allow_html=True)
 
-    # Daten
+        # Navigation via Radio (wir stylen Links dazu)
+        nav = st.radio("Navigation", ["Startseite", "Planer (Kalender)", "Analysen", "Einstellungen"], index=0, label_visibility="collapsed")
+        # Fake-Links (optisch), aktuelle als .active markieren
+        labels = ["Startseite", "Planer (Kalender)", "Analysen", "Einstellungen"]
+        html = "<div>"
+        for lab in labels:
+            cls = "active" if lab == nav else ""
+            html += f"<a class='{cls}'>{lab}</a>"
+        html += "</div>"
+        st.markdown(html, unsafe_allow_html=True)
+
+        st.markdown("</div>", unsafe_allow_html=True)  # /tp-side
+
+    # Main Content
+    st.markdown("<div class='tp-main'>", unsafe_allow_html=True)
+
+    # ------------- Daten laden -------------
     wdf = load_csv(WORKOUTS_FILE, WORKOUT_COLS)
     pdf = load_csv(PLAN_FILE, PLAN_COLS)
 
-    # --- Tabs ---
-    tab_cal, tab_dash, tab_year, tab_data = st.tabs(["🗓️ Kalender", "📈 Dashboard", "🗓️ Jahr", "📤 Daten"])
+    # ====== STARTSEITE ======
+    if nav == "Startseite":
+        st.markdown("<div class='tp-card'><div class='tp-h1'>Startseite</div><div class='tp-sub'>Schneller Überblick</div></div>", unsafe_allow_html=True)
+        st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
 
-    # ===================== KALENDER =====================
-    with tab_cal:
+        today = date.today()
+        this_week_start = week_start(today)
+        this_week_end = this_week_start + timedelta(days=6)
+
+        # TL (Woche)
+        week_df = wdf[(wdf["date"] >= this_week_start) & (wdf["date"] <= this_week_end)]
+        week_daily = daily_load(week_df, settings)
+        week_tl = float(week_daily["TL"].sum()) if not week_daily.empty else 0.0
+
+        # PMC heute (ATL/CTL/TSB)
+        all_daily = daily_load(wdf, settings)
+        pmc = compute_pmc(all_daily)
+        atl = ctl = tsb = 0.0
+        if not pmc.empty:
+            row = pmc[pmc["date"] == today]
+            if row.empty: row = pmc.iloc[-1:]
+            atl = float(row["ATL"].iloc[0]); ctl = float(row["CTL"].iloc[0]); tsb = float(row["TSB"].iloc[0])
+
+        # KPI-Karten
+        c1, c2, c3, c4 = st.columns(4)
+        with c1:
+            st.markdown(f"<div class='tp-kpi'><div class='label'>Wochen-TSS</div><div class='value'>{int(round(week_tl))}</div></div>", unsafe_allow_html=True)
+        with c2:
+            st.markdown(f"<div class='tp-kpi'><div class='label'>Form (TSB) heute</div><div class='value'>{tsb:.0f}</div></div>", unsafe_allow_html=True)
+        with c3:
+            st.markdown(f"<div class='tp-kpi'><div class='label'>ATL</div><div class='value'>{atl:.0f}</div></div>", unsafe_allow_html=True)
+        with c4:
+            st.markdown(f"<div class='tp-kpi'><div class='label'>CTL</div><div class='value'>{ctl:.0f}</div></div>", unsafe_allow_html=True)
+
+        st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
+
+        # Wochen-Übersicht: geplant vs erledigt + kommende geplante
+        st.markdown("<div class='tp-card'><b>Diese Woche</b></div>", unsafe_allow_html=True)
+        week_w = wdf[(wdf["date"] >= this_week_start) & (wdf["date"] <= this_week_end)]
+        if week_w.empty:
+            st.caption("Noch keine Workouts in dieser Woche.")
+        else:
+            n_planned = (week_w["status"].str.lower()=="planned").sum()
+            n_done = (week_w["status"].str.lower()=="done").sum()
+            st.markdown(
+                f"<div class='tp-card' style='margin-top:8px'>"
+                f"<div style='display:flex;gap:12px;flex-wrap:wrap'>"
+                f"<div class='tp-chip tp-chip--planned'>geplant: {int(n_planned)}</div>"
+                f"<div class='tp-chip tp-chip--done'>erledigt: {int(n_done)}</div>"
+                f"</div>"
+                f"</div>",
+                unsafe_allow_html=True
+            )
+            # Nächste geplante (heute..Ende Woche)
+            upcoming = week_w[(week_w["status"].str.lower()=="planned") & (_ts(week_w["date"]) >= _ts(today))]
+            if not upcoming.empty:
+                st.markdown("<div class='tp-card' style='margin-top:8px'><b>Nächste geplante Einheiten</b></div>", unsafe_allow_html=True)
+                for _, w in upcoming.sort_values("date").iterrows():
+                    tl = int(round(training_load(w, settings)))
+                    st.markdown(
+                        f"<div class='tp-card' style='{status_styles('planned')}; margin-top:6px'>"
+                        f"<b>{w['title']}</b> — {w['sport']} • {int(float(w.get('duration_min') or 0))} min"
+                        f"<br><span style='color:{NEON['cyan']};font-weight:700'>TL {tl}</span>"
+                        f"<div style='color:var(--muted); font-size:12px; margin-top:2px'>{pd.to_datetime(w['date']).strftime('%a, %d.%m.')}</div>"
+                        f"</div>",
+                        unsafe_allow_html=True
+                    )
+
+    # ====== PLANER (Kalender) ======
+    if nav == "Planer (Kalender)":
+        st.markdown("<div class='tp-card'><div class='tp-h1'>Planer</div><div class='tp-sub'>Kalender & Wochen-Planer</div></div>", unsafe_allow_html=True)
+        st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+
+        # Navigation Woche/Monat
         view = st.radio("Ansicht", ["Woche","Monat"], index=0, horizontal=True)
         ref = st.session_state.get("ref_date", date.today())
         c1, c2, c3 = st.columns(3)
@@ -434,6 +510,7 @@ def main():
         st.session_state["ref_date"] = ref
         st.markdown("<div style='height:6px'></div>", unsafe_allow_html=True)
 
+        # Wochen-Planer
         with st.expander("📝 Wochen-Planer (Auto-TSS)"):
             submitted, rows = weekly_planner_form(ref)
             if submitted:
@@ -457,6 +534,7 @@ def main():
 
         st.markdown("<div style='height:6px'></div>", unsafe_allow_html=True)
 
+        # Anzeige
         if view == "Woche":
             st.caption(f"KW {ref.isocalendar()[1]} — Woche ab {week_start(ref).strftime('%d.%m.%Y')}")
             days = week_days(ref); cols = st.columns(7)
@@ -464,31 +542,25 @@ def main():
                 with cols[i]:
                     st.markdown(f"<div class='tp-dayhead'>{d.strftime('%a %d.%m.')}</div>", unsafe_allow_html=True)
                     tsd = _ts(d)
-                    # Phasen-Banner
+                    # Phasen
                     ph = pdf[(pdf["kind"]=="phase") & (_ts(pdf["start_date"])<=tsd) & (_ts(pdf["end_date"])>=tsd)]
                     for _, row in ph.iterrows():
                         label = row["title"] or row["phase_type"] or "Phase"
                         bg = PHASE_TYPES.get(row["phase_type"],{}).get("color", "#1f2937")
                         st.markdown(f"<div class='tp-card' style='background:{bg};border-color:rgba(255,255,255,.15)'><b>{row['phase_type'] or 'Phase'}</b><br/>{label}</div>", unsafe_allow_html=True)
-
                     # Rennen
                     rc = pdf[(pdf["kind"]=="race") & (_ts(pdf["start_date"]) == tsd)]
                     for _, r in rc.iterrows():
                         st.markdown(f"<div class='tp-card' style='border-color:rgba(255,255,255,.2)'><b>🏁 {r['title']}</b><br/>{r['sport']} • Prio {r['priority']}</div>", unsafe_allow_html=True)
-
                     # Workouts
                     day_w = wdf[_ts(wdf["date"]) == tsd]
                     for _, w in day_w.iterrows():
                         TL = training_load(w, settings)
                         chip = "tp-chip tp-chip--planned" if w.get("status","")== "planned" else "tp-chip tp-chip--done" if w.get("status","")=="done" else "tp-chip tp-chip--skip"
-                        tags = []
-                        if pd.notna(w.get("avg_hr")) and float(w.get("avg_hr") or 0)>0: tags.append(f"HR {int(float(w['avg_hr']))} bpm")
-                        if str(w.get("sport","")).lower()=="bike" and pd.notna(w.get("avg_power")) and float(w.get("avg_power") or 0)>0: tags.append(f"{int(float(w['avg_power']))} W")
-                        tag_str = (" · " + " | ".join(tags)) if tags else ""
                         st.markdown(
                             f"<div class='tp-card' style='{status_styles(w.get('status',''))}'>"
                             f"<div style='display:flex;justify-content:space-between;gap:8px;align-items:center'>"
-                            f"<div><b>{w['title']}</b>{tag_str}<br/><span style='color:var(--muted)'>{w['sport']} • {int(float(w.get('duration_min') or 0))} min</span></div>"
+                            f"<div><b>{w['title']}</b><br/><span style='color:var(--muted)'>{w['sport']} • {int(float(w.get('duration_min') or 0))} min</span></div>"
                             f"<div class='{chip}'> {w.get('status','')} </div>"
                             f"</div>"
                             f"<div style='margin-top:6px;color:{NEON['cyan']};font-weight:700'>TL {int(round(TL))}</div>"
@@ -521,45 +593,41 @@ def main():
                             st.markdown(f"<div style='color:#9CA3AF;font-size:12px'>Workouts: {cnt} (✅ {n_done})</div>", unsafe_allow_html=True)
                     cur += timedelta(days=1)
 
-    # ===================== DASHBOARD =====================
-    with tab_dash:
+    # ====== ANALYSEN ======
+    if nav == "Analysen":
+        st.markdown("<div class='tp-card'><div class='tp-h1'>Analysen</div><div class='tp-sub'>Weekly Load, PMC & Heatmap</div></div>", unsafe_allow_html=True)
+        st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+
         # Zeitraum-Switcher
         win = st.radio("Zeitraum", ["1W","1M","3M","1J"], index=2, horizontal=True)
         today = date.today()
         ranges = {"1W":7, "1M":30, "3M":90, "1J":365}
-        days_back = ranges[win]
-        start_win = today - timedelta(days=days_back)
+        start_win = today - timedelta(days=ranges[win])
 
-        # Ist vs Geplant aufbereiten
         actual_df = wdf[(wdf["status"].str.lower()=="done") | (_ts(wdf["date"]) <= _ts(today))]
         planned_df = wdf[(wdf["status"].str.lower()=="planned") & (_ts(wdf["date"]) >= _ts(today))]
-
         actual_daily = daily_load(actual_df, settings)
         planned_daily = daily_load(planned_df, settings)
 
-        # Weekly Load (nur Fenster)
         wk = weekly_summary(wdf, settings)
         if not wk.empty:
             wkf = wk[wk["week_start"] >= start_win]
-            fig_bar = neon_bar(wkf["week_start"].astype(str), wkf["TL"], title="Wöchentliche Trainingslast (TL)", color=NEON["violet"])
-            st.plotly_chart(fig_bar, use_container_width=True)
+            st.plotly_chart(
+                neon_bar(wkf["week_start"].astype(str), wkf["TL"], title="Wöchentliche Trainingslast (TL)", color=NEON["violet"]),
+                use_container_width=True
+            )
         else:
             st.info("Noch keine Workouts für Weekly Load.")
 
-        # PMC / Forecast
         pmc_actual, pmc_fore = compute_pmc_forecast(actual_daily, planned_daily, horizon_days=int(settings.get("forecast_days") or 28))
         if pmc_actual.empty and pmc_fore.empty:
             st.info("Keine Daten für PMC.")
         else:
-            # Filter auf Fenster
             if not pmc_actual.empty: pmc_actual = pmc_actual[pmc_actual["date"] >= start_win]
             if not pmc_fore.empty:   pmc_fore   = pmc_fore[pmc_fore["date"] >= start_win]
-
             xA = pmc_actual["date"] if not pmc_actual.empty else []
-            xF = pmc_fore["date"] if not pmc_fore.empty else []
-
             fig_lines = neon_line(
-                xA if len(xA)>0 else xF,
+                xA if len(xA)>0 else (pmc_fore["date"] if not pmc_fore.empty else []),
                 {
                     "CTL (Ist)": {"y": pmc_actual["CTL"] if not pmc_actual.empty else [], "color": NEON["cyan"]},
                     "ATL (Ist)": {"y": pmc_actual["ATL"] if not pmc_actual.empty else [], "color": NEON["pink"]},
@@ -572,7 +640,7 @@ def main():
                 fig_layout_dark(fig_lines)
             st.plotly_chart(fig_lines, use_container_width=True)
 
-            # TSB Gauge (heute)
+            # TSB heute
             tsb_today = None
             if not pmc_fore.empty:
                 row = pmc_fore[pmc_fore["date"]==today]
@@ -582,23 +650,38 @@ def main():
             if tsb_today is not None:
                 st.plotly_chart(tsb_gauge(tsb_today, title="TSB (Form) heute"), use_container_width=True)
 
-    # ===================== JAHRESANSICHT =====================
-    with tab_year:
+        # Jahres-Heatmap
+        st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
         year = st.slider("Jahr", min_value=2018, max_value=date.today().year, value=date.today().year, step=1)
         daily_all = daily_load(wdf, settings)
-        fig_heat = year_heatmap(daily_all, year)
-        st.plotly_chart(fig_heat, use_container_width=True)
+        st.plotly_chart(year_heatmap(daily_all, year), use_container_width=True)
 
-    # ===================== DATEN =====================
-    with tab_data:
-        st.markdown("<div class='tp-card'><b>Workouts</b></div>", unsafe_allow_html=True)
-        st.dataframe(wdf if not wdf.empty else pd.DataFrame(columns=WORKOUT_COLS), use_container_width=True)
-        st.download_button("📥 Workouts.csv", (wdf if not wdf.empty else pd.DataFrame(columns=WORKOUT_COLS)).to_csv(index=False).encode("utf-8"), "workouts.csv")
+    # ====== EINSTELLUNGEN ======
+    if nav == "Einstellungen":
+        st.markdown("<div class='tp-card'><div class='tp-h1'>Einstellungen</div><div class='tp-sub'>Ziele & Integrationen</div></div>", unsafe_allow_html=True)
         st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
-        st.markdown("<div class='tp-card'><b>Plan (Phasen & Wettkämpfe)</b></div>", unsafe_allow_html=True)
-        st.dataframe(pdf if not pdf.empty else pd.DataFrame(columns=PLAN_COLS), use_container_width=True)
-        st.download_button("📥 Plan.csv", (pdf if not pdf.empty else pd.DataFrame(columns=PLAN_COLS)).to_csv(index=False).encode("utf-8"), "plan.csv")
-        st.caption("Hinweis: Auf Streamlit Cloud sind Dateien nicht dauerhaft. Für Persistenz später Supabase/Postgres nutzen.")
+
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            ftp = st.number_input("FTP (W, nur Bike)", min_value=0, step=5, value=int(settings.get("ftp_watt") or 0))
+        with c2:
+            lthr = st.number_input("LTHR (bpm)", min_value=0, step=1, value=int(settings.get("lthr_bpm") or 0))
+        with c3:
+            forecast_days = st.number_input("Forecast (Tage)", min_value=7, max_value=90, step=7, value=int(settings.get("forecast_days") or 28))
+        if st.button("Speichern"):
+            settings["ftp_watt"] = int(ftp) if ftp>0 else None
+            settings["lthr_bpm"] = int(lthr) if lthr>0 else None
+            settings["forecast_days"] = int(forecast_days)
+            save_settings(settings)
+            st.success("Einstellungen gespeichert.")
+
+        st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
+        st.caption("Tipp: Für echte Persistenz (Login, Cloud) später Supabase einbauen. Für Strava-Sync brauchen wir OAuth – kann ich dir nachziehen.")
+
+    # ----- Shell schließen -----
+    st.markdown("</div>", unsafe_allow_html=True)   # /tp-main
+    st.markdown("</div>", unsafe_allow_html=True)   # /tp-app
 
 if __name__ == "__main__":
     main()
+
