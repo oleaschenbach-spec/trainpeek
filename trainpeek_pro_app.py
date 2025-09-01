@@ -8,11 +8,6 @@ import matplotlib.pyplot as plt
 from pathlib import Path
 from datetime import date, timedelta
 import json
-def _ts(x):
-    """Serie oder Skalar robust zu normalisierten Timestamps konvertieren."""
-    if isinstance(x, pd.Series):
-        return pd.to_datetime(x, errors="coerce").dt.normalize()
-    return pd.Timestamp(x).normalize()
 
 st.set_page_config(page_title="TrainPeek Pro", page_icon="🏃‍♂️", layout="wide")
 
@@ -21,7 +16,7 @@ WORKOUTS_FILE = DATA_DIR / "workouts.csv"
 PLAN_FILE = DATA_DIR / "plan.csv"
 SETTINGS_FILE = DATA_DIR / "settings.json"
 
-# NEU: avg_hr, avg_power
+# Spalten inkl. Avg HR / Avg Power für Auto-TSS
 WORKOUT_COLS = [
     "date","sport","title","duration_min","distance_km","rpe","tss","avg_hr","avg_power","notes"
 ]
@@ -39,6 +34,13 @@ PHASE_TYPES = {
     "Taper":     {"color": "#F3E5F5"},
     "Erholung":  {"color": "#FFEBEE"},
 }
+
+# ---------- Timestamp-Helfer (fix für Date/Datetime-Vergleiche) ----------
+def _ts(x):
+    """Serie oder Skalar robust zu normalisierten Timestamps konvertieren."""
+    if isinstance(x, pd.Series):
+        return pd.to_datetime(x, errors="coerce").dt.normalize()
+    return pd.Timestamp(x).normalize()
 
 # -------------------- Storage helpers --------------------
 def ensure_dir():
@@ -81,7 +83,7 @@ def load_csv(path: Path, columns: list[str]) -> pd.DataFrame:
         if c in df.columns:
             df[c] = df[c].astype(str).fillna("")
 
-    # datum robust (DD.MM.YYYY erlaubt)
+    # datum robust (DD.MM.YYYY erlaubt) -> als date speichern
     for c in ["date","start_date","end_date"]:
         if c in df.columns:
             df[c] = pd.to_datetime(df[c], errors="coerce", dayfirst=True).dt.date
@@ -384,9 +386,13 @@ def main():
             for i, d in enumerate(days):
                 with cols[i]:
                     st.markdown(f"#### {d.strftime('%a %d.%m.')}")
-                    # Phasen
-                    ph = load_csv(PLAN_FILE, PLAN_COLS)
-                    ph = ph[(ph["kind"]=="phase") & (ph["start_date"]<=d) & (ph["end_date"]>=d)]
+                    tsd = _ts(d)
+                    # Phasen (Timestamp-Vergleiche)
+                    ph = pdf[
+                        (pdf["kind"]=="phase") &
+                        (_ts(pdf["start_date"]) <= tsd) &
+                        (_ts(pdf["end_date"])   >= tsd)
+                    ]
                     for _, row in ph.iterrows():
                         label = row["title"] or row["phase_type"] or "Phase"
                         bg = row["color"] or PHASE_TYPES.get(row["phase_type"],{}).get("color","#FFFDE7")
@@ -395,15 +401,17 @@ def main():
                             unsafe_allow_html=True
                         )
                     # Rennen
-                    rc = load_csv(PLAN_FILE, PLAN_COLS)
-                    rc = rc[(rc["kind"]=="race") & (rc["start_date"]==d)]
+                    rc = pdf[
+                        (pdf["kind"]=="race") &
+                        (_ts(pdf["start_date"]) == tsd)
+                    ]
                     for _, r in rc.iterrows():
                         st.markdown(
                             f"<div style='background:{r['color'] or '#F8D7DA'};border:1px solid rgba(0,0,0,.08);border-radius:8px;padding:6px;font-size:12px'><b>🏁 {r['title']}</b><br/>{r['sport']} • Prio {r['priority']}</div>",
                             unsafe_allow_html=True
                         )
                     # Workouts
-                    day_w = wdf[wdf["date"]==d]
+                    day_w = wdf[_ts(wdf["date"]) == tsd]
                     for _, w in day_w.iterrows():
                         TL = training_load(w, settings)
                         tags = []
@@ -431,17 +439,25 @@ def main():
                         muted = (d.month != ref.month)
                         style = "opacity:.5" if muted else ""
                         st.markdown(f"<div style='{style}'><b>{d.day}</b></div>", unsafe_allow_html=True)
-                        # Phasenhinweis
-                        ph = pdf[(pdf["kind"]=="phase") & (pdf["start_date"]<=d) & (pdf["end_date"]>=d)]
+                        tsd = _ts(d)
+                        # Phasen
+                        ph = pdf[
+                            (pdf["kind"]=="phase") &
+                            (_ts(pdf["start_date"]) <= tsd) &
+                            (_ts(pdf["end_date"])   >= tsd)
+                        ]
                         if not ph.empty:
                             ptype = ph.iloc[0]["phase_type"] or "Phase"
                             st.markdown(f"<div style='font-size:11px;border:1px dashed rgba(0,0,0,.2);border-radius:6px;padding:3px'>{ptype}</div>", unsafe_allow_html=True)
                         # Rennen
-                        rc = pdf[(pdf["kind"]=="race") & (pdf["start_date"]==d)]
+                        rc = pdf[
+                            (pdf["kind"]=="race") &
+                            (_ts(pdf["start_date"]) == tsd)
+                        ]
                         for _, r in rc.iterrows():
                             st.markdown(f"<div style='font-size:11px;border:1px solid rgba(0,0,0,.1);border-radius:6px;padding:3px'>🏁 {r['title']}</div>", unsafe_allow_html=True)
-                        # Count Workouts
-                        cnt = (wdf["date"]==d).sum()
+                        # Workouts
+                        cnt = int((_ts(wdf["date"]) == tsd).sum())
                         if cnt:
                             st.markdown(f"<div style='font-size:11px'>Workouts: {int(cnt)}</div>", unsafe_allow_html=True)
                     cur += timedelta(days=1)
@@ -489,10 +505,9 @@ def main():
         st.download_button("📥 Workouts.csv", (wdf if not wdf.empty else pd.DataFrame(columns=WORKOUT_COLS)).to_csv(index=False).encode("utf-8"), "workouts.csv")
         st.divider()
         st.subheader("Plan (Phasen & Wettkämpfe)")
-        st.dataframe(pdf if not pdf.empty else pd.DataFrame(columns=PLAN_COLS), use_container_width=True)
+        st.dataframe(pdf if not wdf.empty else pd.DataFrame(columns=PLAN_COLS), use_container_width=True)
         st.download_button("📥 Plan.csv", (pdf if not pdf.empty else pd.DataFrame(columns=PLAN_COLS)).to_csv(index=False).encode("utf-8"), "plan.csv")
         st.caption("Hinweis: Auf Streamlit Cloud sind Dateien nicht dauerhaft. Für Persistenz später Supabase/Postgres nutzen.")
 
 if __name__ == "__main__":
     main()
-
