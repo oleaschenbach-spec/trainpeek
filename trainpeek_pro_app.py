@@ -1,13 +1,16 @@
 # trainpeek_pro_app.py
-# Kalender (Woche/Monat), Phasen (Grundlage/Aufbau/Spitze/Taper/Erholung),
-# Wochen-Planer und automatische TSS-Berechnung aus Dauer + HR oder (nur Bike) Watt.
+# Kalender (Woche/Monat) mit Status (planned/done), Phasen (Grundlage/Aufbau/Spitze/Taper/Erholung),
+# Wochen-Planer, Auto-TSS (HR/Power), Forecast von ATL/CTL/TSB aus geplanten Workouts,
+# und Strava-Embed über Einstellungen.
+
 import streamlit as st
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 from pathlib import Path
-from datetime import date, timedelta
+from datetime import date, timedelta, datetime
 import json
+import uuid
 
 st.set_page_config(page_title="TrainPeek Pro", page_icon="🏃‍♂️", layout="wide")
 
@@ -16,9 +19,10 @@ WORKOUTS_FILE = DATA_DIR / "workouts.csv"
 PLAN_FILE = DATA_DIR / "plan.csv"
 SETTINGS_FILE = DATA_DIR / "settings.json"
 
-# Spalten inkl. Avg HR / Avg Power für Auto-TSS
+# Workouts: NEU -> id, status, avg_hr, avg_power
 WORKOUT_COLS = [
-    "date","sport","title","duration_min","distance_km","rpe","tss","avg_hr","avg_power","notes"
+    "id","date","sport","title","duration_min","distance_km","rpe","tss",
+    "avg_hr","avg_power","status","notes"
 ]
 PLAN_COLS = [
     "kind","phase_type","title","start_date","end_date","sport","priority","color","notes"
@@ -48,14 +52,17 @@ def ensure_dir():
 
 def load_settings():
     ensure_dir()
+    base = {"ftp_watt": None, "lthr_bpm": None, "strava_embed_url": "", "forecast_days": 28}
     if SETTINGS_FILE.exists():
         try:
-            return json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
+            data = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
+            base.update({k: data.get(k, base[k]) for k in base})
+            return base
         except Exception:
-            return {"ftp_watt": None, "lthr_bpm": None}
-    return {"ftp_watt": None, "lthr_bpm": None}
+            return base
+    return base
 
-def save_settings(s):
+def save_settings(s: dict):
     ensure_dir()
     SETTINGS_FILE.write_text(json.dumps(s, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -79,7 +86,7 @@ def load_csv(path: Path, columns: list[str]) -> pd.DataFrame:
             df[c] = pd.to_numeric(df[c], errors="coerce")
 
     # textfelder
-    for c in ["title","sport","priority","notes","kind","color","phase_type"]:
+    for c in ["id","title","sport","priority","notes","kind","color","phase_type","status"]:
         if c in df.columns:
             df[c] = df[c].astype(str).fillna("")
 
@@ -91,6 +98,17 @@ def load_csv(path: Path, columns: list[str]) -> pd.DataFrame:
     # plan-zeilen ohne datumsrange raus
     if {"start_date","end_date"}.issubset(df.columns):
         df = df[df["start_date"].notna() & df["end_date"].notna()].copy()
+
+    # Migration: fehlende ids / status auffüllen
+    if "id" in df.columns:
+        mask_empty = (df["id"].astype(str)=="") | df["id"].isna()
+        if mask_empty.any():
+            df.loc[mask_empty, "id"] = [str(uuid.uuid4()) for _ in range(mask_empty.sum())]
+    if "status" in df.columns:
+        df["status"] = df["status"].replace({"": np.nan})
+        df["status"] = df["status"].fillna(
+            np.where(df.get("notes","").str.lower().eq("planned"), "planned", "done")
+        )
 
     return df
 
@@ -171,6 +189,33 @@ def compute_pmc(daily: pd.DataFrame, tau_atl=7.0, tau_ctl=42.0) -> pd.DataFrame:
     merged["TSB"] = CTL - ATL
     return merged
 
+def compute_pmc_forecast(actual_daily: pd.DataFrame, planned_daily: pd.DataFrame,
+                         settings: dict, horizon_days: int = 28):
+    """
+    Liefert zwei DataFrames:
+      - pmc_actual : bis heute (nur tatsächlich vorhandene Workouts <= heute)
+      - pmc_fore   : inkl. geplanter TL bis +horizon_days
+    """
+    today = date.today()
+    act = actual_daily.copy()
+    act = act[act["date"] <= today] if not act.empty else act
+    pmc_actual = compute_pmc(act)
+
+    # Forecast: kombiniere Ist + geplante (>= heute)
+    fore = act.copy()
+    if not planned_daily.empty:
+        fore = pd.concat([fore, planned_daily[planned_daily["date"] > today]], ignore_index=True)
+    # Falls es keine zukünftigen Tage gibt, hänge leere Tage bis horizon an
+    if fore.empty:
+        start = today
+    else:
+        start = min(fore["date"].min(), today)
+    end = today + timedelta(days=horizon_days)
+    all_days = pd.DataFrame({"date": pd.date_range(start, end, freq="D").date})
+    merged = all_days.merge(fore, on="date", how="left").fillna({"TL": 0.0})
+    pmc_fore = compute_pmc(merged)
+    return pmc_actual, pmc_fore
+
 def week_start(d: date) -> date:
     return d - timedelta(days=d.weekday())
 
@@ -194,6 +239,16 @@ def weekly_summary(df: pd.DataFrame, settings: dict) -> pd.DataFrame:
 # -------------------- UI bits --------------------
 def phase_color(phase_type: str) -> str:
     return PHASE_TYPES.get(phase_type, {}).get("color", "#FFFDE7")
+
+def status_styles(status: str):
+    status = (status or "").lower()
+    if status == "planned":
+        return "border:1px solid #FBC02D;background:#FFFDE7"  # gelblich
+    if status == "done":
+        return "border:1px solid #2e7d32;background:#E8F5E9"  # grün
+    if status == "skipped":
+        return "border:1px solid #9e9e9e;background:#FAFAFA"  # grau
+    return "border:1px solid rgba(0,0,0,.08);background:#FFFFFF"
 
 def weekly_planner_form(ref_week: date):
     days = week_days(ref_week)
@@ -220,25 +275,41 @@ def weekly_planner_form(ref_week: date):
         submitted = st.form_submit_button("➕ Woche speichern")
     return submitted, rows
 
+def mark_done_ui(wdf: pd.DataFrame, row_id: str):
+    """Button zum Markieren als erledigt; gibt True zurück, wenn geändert wurde."""
+    key = f"done_{row_id}"
+    return st.button("✅ Erledigt", key=key, use_container_width=True)
+
 # -------------------- App --------------------
 def main():
     ensure_dir()
     settings = load_settings()
 
-    st.title("🏃‍♂️ TrainPeek Pro — Kalender, Phasen & Auto-TSS")
+    st.title("🏃‍♂️ TrainPeek Pro — Kalender, Phasen, Status & Forecast")
 
-    # --- Einstellungen (FTP/LTHR) ---
-    with st.expander("⚙️ Einstellungen (für Auto-TSS)", expanded=False):
+    # --- Einstellungen (FTP/LTHR/Strava/Forescast) ---
+    with st.expander("⚙️ Einstellungen", expanded=False):
         c1, c2 = st.columns(2)
         with c1:
             ftp = st.number_input("FTP (W, nur Bike)", min_value=0, step=5, value=int(settings.get("ftp_watt") or 0))
+            forecast_days = st.number_input("Forecast-Horizont (Tage)", min_value=7, max_value=90, step=7, value=int(settings.get("forecast_days") or 28))
         with c2:
             lthr = st.number_input("LTHR / Schwellen-HF (bpm)", min_value=0, step=1, value=int(settings.get("lthr_bpm") or 0))
+            strava_url = st.text_input("Strava Embed-URL (Aktivität/Route)", value=settings.get("strava_embed_url") or "", help="In Strava auf „Teilen/Einbetten“ klicken und die URL einfügen.")
         if st.button("Einstellungen speichern"):
             settings["ftp_watt"] = int(ftp) if ftp > 0 else None
             settings["lthr_bpm"] = int(lthr) if lthr > 0 else None
+            settings["strava_embed_url"] = strava_url.strip()
+            settings["forecast_days"] = int(forecast_days)
             save_settings(settings)
-            st.success("Gespeichert. Auto-TSS nutzt diese Werte.")
+            st.success("Einstellungen gespeichert.")
+
+        if settings.get("strava_embed_url"):
+            st.write("**Strava-Embed**")
+            try:
+                st.components.v1.iframe(settings["strava_embed_url"], height=460, scrolling=True)
+            except Exception:
+                st.warning("Konnte Strava-Iframe nicht laden. Prüfe die URL oder Einbettungsrechte.")
 
     # Daten laden
     wdf = load_csv(WORKOUTS_FILE, WORKOUT_COLS)
@@ -259,16 +330,19 @@ def main():
             dist = st.number_input("Distanz (km)", 0.0, step=0.5, value=0.0)
             tss = st.number_input("TSS (falls bekannt)", 0.0, step=5.0, value=0.0)
             avg_power = st.number_input("Durchschn. Watt (Bike)", min_value=0, step=5, value=0)
+        status = st.selectbox("Status", ["planned","done","skipped"], index=1 if d_val <= date.today() else 0)
         notes = st.text_area("Notizen", height=60)
 
         if st.button("Workout speichern", use_container_width=True):
             row = {
+                "id": str(uuid.uuid4()),
                 "date": d_val, "sport": sport, "title": title.strip() or "Workout",
                 "duration_min": dur, "distance_km": dist if dist>0 else np.nan,
                 "rpe": rpe,
                 "tss": tss if tss>0 else np.nan,
                 "avg_hr": avg_hr if avg_hr>0 else np.nan,
                 "avg_power": avg_power if avg_power>0 else np.nan,
+                "status": status,
                 "notes": notes.strip()
             }
             # Auto-TSS, wenn TSS leer:
@@ -355,6 +429,7 @@ def main():
                     if not title.strip():
                         continue
                     row = {
+                        "id": str(uuid.uuid4()),
                         "date": d, "sport": sport, "title": title.strip(),
                         "duration_min": int(dur) if dur else np.nan,
                         "distance_km": np.nan,
@@ -362,6 +437,7 @@ def main():
                         "tss": float(tss) if tss else np.nan,   # manuell überschreibt Auto-TSS
                         "avg_hr": int(avg_hr) if avg_hr else np.nan,
                         "avg_power": int(avg_power) if avg_power else np.nan,
+                        "status": "planned",
                         "notes": "planned"
                     }
                     # Auto-TSS nur, wenn tss leer
@@ -401,10 +477,7 @@ def main():
                             unsafe_allow_html=True
                         )
                     # Rennen
-                    rc = pdf[
-                        (pdf["kind"]=="race") &
-                        (_ts(pdf["start_date"]) == tsd)
-                    ]
+                    rc = pdf[(pdf["kind"]=="race") & (_ts(pdf["start_date"]) == tsd)]
                     for _, r in rc.iterrows():
                         st.markdown(
                             f"<div style='background:{r['color'] or '#F8D7DA'};border:1px solid rgba(0,0,0,.08);border-radius:8px;padding:6px;font-size:12px'><b>🏁 {r['title']}</b><br/>{r['sport']} • Prio {r['priority']}</div>",
@@ -415,17 +488,24 @@ def main():
                     for _, w in day_w.iterrows():
                         TL = training_load(w, settings)
                         tags = []
-                        if pd.notna(w.get("avg_hr")) and w.get("avg_hr")>0:
-                            tags.append(f"HR {int(w['avg_hr'])} bpm")
-                        if str(w.get("sport","")).lower()=="bike" and pd.notna(w.get("avg_power")) and w.get("avg_power")>0:
-                            tags.append(f"{int(w['avg_power'])} W")
-                        if str(w.get("notes","")).lower()=="planned":
+                        if pd.notna(w.get("avg_hr")) and float(w.get("avg_hr") or 0) > 0:
+                            tags.append(f"HR {int(float(w['avg_hr']))} bpm")
+                        if str(w.get("sport","")).lower()=="bike" and pd.notna(w.get("avg_power")) and float(w.get("avg_power") or 0)>0:
+                            tags.append(f"{int(float(w['avg_power']))} W")
+                        if (w.get("status","").lower()=="planned"):
                             tags.append("geplant")
                         tag_str = (" · " + " | ".join(tags)) if tags else ""
+                        style = status_styles(w.get("status",""))
                         st.markdown(
-                            f"<div style='border:1px solid rgba(0,0,0,.08);border-radius:8px;padding:6px;font-size:12px'><b>{w['title']}</b>{tag_str}<br/>{w['sport']} • {int(w.get('duration_min') or 0)} min • TL {int(round(TL))}</div>",
+                            f"<div style='{style};border-radius:8px;padding:6px;font-size:12px'><b>{w['title']}</b>{tag_str}<br/>{w['sport']} • {int(float(w.get('duration_min') or 0))} min • TL {int(round(TL))}</div>",
                             unsafe_allow_html=True
                         )
+                        # Erledigt-Button
+                        if w.get("status","") != "done":
+                            if mark_done_ui(wdf, w["id"]):
+                                wdf.loc[wdf["id"]==w["id"], "status"] = "done"
+                                save_csv(wdf, WORKOUTS_FILE)
+                                st.experimental_rerun()
         else:
             st.caption(ref.strftime("%B %Y"))
             first = ref.replace(day=1)
@@ -437,8 +517,8 @@ def main():
                     d = cur
                     with cols[i]:
                         muted = (d.month != ref.month)
-                        style = "opacity:.5" if muted else ""
-                        st.markdown(f"<div style='{style}'><b>{d.day}</b></div>", unsafe_allow_html=True)
+                        style_muted = "opacity:.5" if muted else ""
+                        st.markdown(f"<div style='{style_muted}'><b>{d.day}</b></div>", unsafe_allow_html=True)
                         tsd = _ts(d)
                         # Phasen
                         ph = pdf[
@@ -450,25 +530,24 @@ def main():
                             ptype = ph.iloc[0]["phase_type"] or "Phase"
                             st.markdown(f"<div style='font-size:11px;border:1px dashed rgba(0,0,0,.2);border-radius:6px;padding:3px'>{ptype}</div>", unsafe_allow_html=True)
                         # Rennen
-                        rc = pdf[
-                            (pdf["kind"]=="race") &
-                            (_ts(pdf["start_date"]) == tsd)
-                        ]
+                        rc = pdf[(pdf["kind"]=="race") & (_ts(pdf["start_date"]) == tsd)]
                         for _, r in rc.iterrows():
                             st.markdown(f"<div style='font-size:11px;border:1px solid rgba(0,0,0,.1);border-radius:6px;padding:3px'>🏁 {r['title']}</div>", unsafe_allow_html=True)
-                        # Workouts
-                        cnt = int((_ts(wdf["date"]) == tsd).sum())
-                        if cnt:
-                            st.markdown(f"<div style='font-size:11px'>Workouts: {int(cnt)}</div>", unsafe_allow_html=True)
+                        # Workouts (Counter + Farbhint)
+                        day_w = wdf[_ts(wdf["date"]) == tsd]
+                        if not day_w.empty:
+                            cnt = len(day_w)
+                            n_done = (day_w["status"].str.lower()=="done").sum()
+                            st.markdown(f"<div style='font-size:11px'>Workouts: {cnt} (✅ {n_done})</div>", unsafe_allow_html=True)
                     cur += timedelta(days=1)
 
     # Dashboard
     with tab_dash:
+        st.subheader("Wöchentliche Trainingslast (Ist)")
         wk = weekly_summary(wdf, settings)
         if wk.empty:
             st.info("Noch keine Workouts.")
         else:
-            st.subheader("Wöchentliche Trainingslast")
             st.dataframe(wk, use_container_width=True)
             fig1, ax1 = plt.subplots()
             ax1.bar(wk["week_start"].astype(str), wk["TL"])
@@ -478,25 +557,53 @@ def main():
             plt.xticks(rotation=45, ha="right")
             st.pyplot(fig1, clear_figure=True)
 
-        st.subheader("Performance Management Chart (ATL/CTL/TSB)")
-        daily = daily_load(wdf, settings)
-        pmc = compute_pmc(daily)
-        if pmc.empty:
-            st.info("Noch keine Daten für PMC.")
+        # Forecast vorbereiten: Ist-TL und geplante TL getrennt
+        today = date.today()
+        actual_df = wdf.copy()
+        planned_df = wdf.copy()
+
+        # Ist: Alles mit status==done (oder <= heute interpretiert als Ist)
+        actual_df = actual_df[(actual_df["status"].str.lower()=="done") | (_ts(actual_df["date"]) <= _ts(today))]
+        actual_daily = daily_load(actual_df, settings)
+
+        # Geplant: status==planned UND zukünftige Tage
+        planned_df = planned_df[(planned_df["status"].str.lower()=="planned") & (_ts(planned_df["date"]) >= _ts(today))]
+        planned_daily = daily_load(planned_df, settings)
+
+        pmc_actual, pmc_fore = compute_pmc_forecast(actual_daily, planned_daily, settings, horizon_days=int(settings.get("forecast_days") or 28))
+
+        st.subheader("PMC / Form (Ist & Prognose)")
+        if pmc_fore.empty and pmc_actual.empty:
+            st.info("Keine Daten für PMC/Forecast.")
         else:
+            # CTL/ATL: Ist vs. Prognose
             fig2, ax2 = plt.subplots()
-            ax2.plot(pmc["date"], pmc["CTL"], label="CTL (42d)")
-            ax2.plot(pmc["date"], pmc["ATL"], label="ATL (7d)")
-            ax2.set_xlabel("Datum"); ax2.set_ylabel("Belastung"); ax2.set_title("ATL & CTL")
+            if not pmc_actual.empty:
+                ax2.plot(pmc_actual["date"], pmc_actual["CTL"], label="CTL (Ist)")
+                ax2.plot(pmc_actual["date"], pmc_actual["ATL"], label="ATL (Ist)")
+            if not pmc_fore.empty:
+                ax2.plot(pmc_fore["date"], pmc_fore["CTL"], linestyle="--", label="CTL (Forecast)")
+                ax2.plot(pmc_fore["date"], pmc_fore["ATL"], linestyle="--", label="ATL (Forecast)")
+            ax2.axvline(pd.to_datetime(today), linestyle=":", linewidth=1)
+            ax2.set_xlabel("Datum"); ax2.set_ylabel("Belastung")
+            ax2.set_title("ATL / CTL (Ist & Forecast)")
             ax2.legend()
             st.pyplot(fig2, clear_figure=True)
 
+            # TSB (Form): Ist vs. Prognose
             fig3, ax3 = plt.subplots()
-            ax3.plot(pmc["date"], pmc["TSB"]); ax3.axhline(0)
-            ax3.set_xlabel("Datum"); ax3.set_ylabel("TSB"); ax3.set_title("TSB (Frische)")
+            if not pmc_actual.empty:
+                ax3.plot(pmc_actual["date"], pmc_actual["TSB"], label="TSB (Ist)")
+            if not pmc_fore.empty:
+                ax3.plot(pmc_fore["date"], pmc_fore["TSB"], linestyle="--", label="TSB (Forecast)")
+            ax3.axhline(0)
+            ax3.axvline(pd.to_datetime(today), linestyle=":", linewidth=1)
+            ax3.set_xlabel("Datum"); ax3.set_ylabel("TSB")
+            ax3.set_title("Form (TSB) — Ist & Forecast")
+            ax3.legend()
             st.pyplot(fig3, clear_figure=True)
 
-        st.caption("Auto-TSS nutzt deine FTP/LTHR-Einstellungen. Falls beides fehlt, wird Dauer×RPE verwendet.")
+        st.caption("Forecast basiert auf deinen **geplanten** künftigen Workouts (Auto-TSS, falls TSS leer). Heute = vertikale Linie. „Ist“ umfasst erledigte + heutige Einheiten.")
 
     # Daten
     with tab_data:
@@ -505,7 +612,7 @@ def main():
         st.download_button("📥 Workouts.csv", (wdf if not wdf.empty else pd.DataFrame(columns=WORKOUT_COLS)).to_csv(index=False).encode("utf-8"), "workouts.csv")
         st.divider()
         st.subheader("Plan (Phasen & Wettkämpfe)")
-        st.dataframe(pdf if not wdf.empty else pd.DataFrame(columns=PLAN_COLS), use_container_width=True)
+        st.dataframe(pdf if not pdf.empty else pd.DataFrame(columns=PLAN_COLS), use_container_width=True)
         st.download_button("📥 Plan.csv", (pdf if not pdf.empty else pd.DataFrame(columns=PLAN_COLS)).to_csv(index=False).encode("utf-8"), "plan.csv")
         st.caption("Hinweis: Auf Streamlit Cloud sind Dateien nicht dauerhaft. Für Persistenz später Supabase/Postgres nutzen.")
 
