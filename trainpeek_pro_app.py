@@ -8,6 +8,11 @@ import matplotlib.pyplot as plt
 from pathlib import Path
 from datetime import date, timedelta
 import json
+def _ts(x):
+    """Serie oder Skalar robust zu normalisierten Timestamps konvertieren."""
+    if isinstance(x, pd.Series):
+        return pd.to_datetime(x, errors="coerce").dt.normalize()
+    return pd.Timestamp(x).normalize()
 
 st.set_page_config(page_title="TrainPeek Pro", page_icon="🏃‍♂️", layout="wide")
 
