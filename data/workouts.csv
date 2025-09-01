@@ -1,0 +1,5 @@
+date,sport,title,duration_min,distance_km,rpe,tss,notes
+2025-08-20,Run,Easy Run,45,8.2,4,,locker
+2025-08-22,Bike,Endurance Ride,90,40,5,,
+2025-08-23,Strength,Gym,60,,6,,
+2025-08-27,Run,Intervals,50,10,8,80,"5x1k"
